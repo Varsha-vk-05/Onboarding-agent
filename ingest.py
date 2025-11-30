@@ -19,15 +19,73 @@ class DocumentIngester:
     def __init__(self, chroma_db_path: str = "./chroma_db", 
                  collection_name: str = "onboarding_docs"):
         """Initialize ChromaDB client and collection."""
-        self.chroma_db_path = chroma_db_path
         self.collection_name = collection_name
         self.db = Database()
         
-        # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(
-            path=chroma_db_path,
-            settings=Settings(anonymized_telemetry=False)
-        )
+        # Determine writable path for ChromaDB
+        # Try to use the provided path first, but fallback to writable locations
+        original_path = Path(chroma_db_path)
+        
+        # Check if we can write to the original path
+        if original_path.exists():
+            # Directory exists, check if it's writable
+            if not os.access(original_path, os.W_OK):
+                # Try alternative writable locations
+                alt_paths = [
+                    Path.cwd() / "chroma_db",  # Current directory
+                    Path("/tmp") / "chroma_db",  # Temp directory (Linux/Mac)
+                    Path.home() / ".chroma_db",  # Home directory
+                ]
+                for alt_path in alt_paths:
+                    try:
+                        alt_path.mkdir(parents=True, exist_ok=True)
+                        if os.access(alt_path, os.W_OK):
+                            chroma_db_path = str(alt_path)
+                            break
+                    except (PermissionError, OSError):
+                        continue
+        else:
+            # Directory doesn't exist, try to create it
+            try:
+                original_path.mkdir(parents=True, exist_ok=True)
+                if os.access(original_path, os.W_OK):
+                    chroma_db_path = str(original_path)
+                else:
+                    # Fallback to current directory
+                    chroma_db_path = str(Path.cwd() / "chroma_db")
+                    Path(chroma_db_path).mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError):
+                # Fallback to current directory
+                chroma_db_path = str(Path.cwd() / "chroma_db")
+                try:
+                    Path(chroma_db_path).mkdir(parents=True, exist_ok=True)
+                except:
+                    # Last resort: use temp directory
+                    import tempfile
+                    chroma_db_path = str(Path(tempfile.gettempdir()) / "chroma_db")
+                    Path(chroma_db_path).mkdir(parents=True, exist_ok=True)
+        
+        self.chroma_db_path = chroma_db_path
+        
+        # Initialize ChromaDB client with error handling
+        try:
+            self.client = chromadb.PersistentClient(
+                path=chroma_db_path,
+                settings=Settings(anonymized_telemetry=False)
+            )
+        except Exception as e:
+            # If the original path fails, try a temp directory
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                import tempfile
+                temp_path = str(Path(tempfile.gettempdir()) / "chroma_db")
+                Path(temp_path).mkdir(parents=True, exist_ok=True)
+                self.chroma_db_path = temp_path
+                self.client = chromadb.PersistentClient(
+                    path=temp_path,
+                    settings=Settings(anonymized_telemetry=False)
+                )
+            else:
+                raise
         
         # Use default embedding function (sentence-transformers)
         self.embedding_function = embedding_functions.DefaultEmbeddingFunction()
@@ -162,15 +220,35 @@ class DocumentIngester:
                     metadatas.append(chunk_metadata)
                     ids.append(chunk_hash)
             
-            # Add to ChromaDB collection
-            self.collection.add(
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids
-            )
+            # Add to ChromaDB collection with error handling
+            try:
+                self.collection.add(
+                    documents=documents,
+                    metadatas=metadatas,
+                    ids=ids
+                )
+            except Exception as chroma_error:
+                error_str = str(chroma_error).lower()
+                if "readonly" in error_str or "read-only" in error_str or "1032" in str(chroma_error):
+                    # Try to update status to error
+                    try:
+                        self.db.update_document_status(doc_id, 'error')
+                    except:
+                        pass
+                    return False, (
+                        f"ChromaDB database is read-only. Cannot write to: {self.chroma_db_path}. "
+                        "This is a common issue on Streamlit Cloud. The app will try to use an alternative location. "
+                        "If the error persists, try redeploying the app."
+                    )
+                else:
+                    raise
             
             # Update document status
-            self.db.update_document_status(doc_id, 'processed')
+            try:
+                self.db.update_document_status(doc_id, 'processed')
+            except Exception as db_error:
+                # If database update fails, log but don't fail the whole operation
+                print(f"Warning: Could not update document status in SQLite: {db_error}")
             
             return True, None
             

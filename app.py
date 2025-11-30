@@ -1173,22 +1173,42 @@ def show_document_upload():
                     if error_message:
                         st.warning(f"**Details:** {error_message}")
                         # Provide helpful suggestions based on error
-                        if "readonly" in error_message.lower() or "read-only" in error_message.lower() or "permission" in error_message.lower() or "database" in error_message.lower():
+                        if "readonly" in error_message.lower() or "read-only" in error_message.lower() or "permission" in error_message.lower() or "database" in error_message.lower() or "chromadb" in error_message.lower() or "1032" in error_message:
                             st.error("🔒 **Database Permission Error**")
-                            st.info("""
-                            **This error occurs when the database file is read-only.**
                             
-                            **For Streamlit Cloud:**
-                            - This is a known limitation. The database file may need to be in a writable location.
-                            - Try restarting the app or redeploying.
-                            
-                            **For Local Development:**
-                            - Check file permissions on `onboarding.db`
-                            - Ensure you have write access to the directory
-                            - Try deleting the database file and letting the app recreate it
-                            
-                            **Workaround:** The app will try to use an alternative location automatically.
-                            """)
+                            # Check if it's ChromaDB or SQLite
+                            if "chromadb" in error_message.lower() or "1032" in error_message:
+                                st.info("""
+                                **This is a ChromaDB (vector database) permission error.**
+                                
+                                **For Streamlit Cloud:**
+                                - ChromaDB needs write access to store document embeddings
+                                - The app will automatically try to use a writable location
+                                - If the error persists, try redeploying the app
+                                - Consider using ChromaDB in-memory mode for testing (data won't persist)
+                                
+                                **For Local Development:**
+                                - Check file permissions on the `chroma_db/` directory
+                                - Ensure you have write access to the directory
+                                - Try deleting the `chroma_db/` folder and letting the app recreate it
+                                
+                                **Note:** The app is trying to use an alternative writable location automatically.
+                                """)
+                            else:
+                                st.info("""
+                                **This error occurs when the database file is read-only.**
+                                
+                                **For Streamlit Cloud:**
+                                - This is a known limitation. The database file may need to be in a writable location.
+                                - Try restarting the app or redeploying.
+                                
+                                **For Local Development:**
+                                - Check file permissions on `onboarding.db`
+                                - Ensure you have write access to the directory
+                                - Try deleting the database file and letting the app recreate it
+                                
+                                **Workaround:** The app will try to use an alternative location automatically.
+                                """)
                         elif "password" in error_message.lower() or "encrypted" in error_message.lower():
                             st.info("💡 **Tip:** Remove the password from your PDF file and try again.")
                         elif "scanned" in error_message.lower() or "image-based" in error_message.lower() or "no extractable text" in error_message.lower():

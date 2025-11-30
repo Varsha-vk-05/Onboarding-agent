@@ -3,12 +3,32 @@ AI Agent module for answering questions and generating personalized onboarding p
 """
 
 import os
+import time
 from typing import List, Dict, Optional
 try:
     from dotenv import load_dotenv
     load_dotenv()  # Load environment variables from .env file
 except Exception:
     pass  # dotenv is optional
+
+# Import OpenAI error classes for better error handling
+try:
+    from openai import RateLimitError, APIError, APIConnectionError
+except ImportError:
+    try:
+        # Try importing from langchain_openai
+        from langchain_openai.utils import OpenAIError
+        RateLimitError = OpenAIError
+        APIError = OpenAIError
+        APIConnectionError = OpenAIError
+    except ImportError:
+        # Fallback - create a base exception class
+        class RateLimitError(Exception):
+            pass
+        class APIError(Exception):
+            pass
+        class APIConnectionError(Exception):
+            pass
 
 # Robust imports for different langchain/openai layouts. If langchain isn't
 # available we provide a minimal fallback that uses the `openai` package so
@@ -140,13 +160,68 @@ Please provide a clear, comprehensive answer. At the end, list the sources you u
             HumanMessage(content=user_prompt)
         ]
         
-        try:
-            response = self.llm.invoke(messages)
-            answer = response.content if hasattr(response, 'content') else str(response)
-        except AttributeError:
-            # Fallback for older API
-            response = self.llm(messages)
-            answer = response.content if hasattr(response, 'content') else str(response)
+        # Retry logic for rate limits and API errors
+        max_retries = 3
+        retry_delay = 2  # Start with 2 seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.llm.invoke(messages)
+                answer = response.content if hasattr(response, 'content') else str(response)
+                break  # Success, exit retry loop
+            except AttributeError:
+                # Fallback for older API
+                try:
+                    response = self.llm(messages)
+                    answer = response.content if hasattr(response, 'content') else str(response)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    error_str = str(e).lower()
+                    error_type = type(e).__name__.lower()
+                    # Check if it's a rate limit error
+                    if 'rate limit' in error_str or 'ratelimit' in error_str or 'ratelimiterror' in error_type:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise Exception(
+                                "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                                "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                            ) from e
+                    elif attempt == max_retries - 1:
+                        raise
+                    else:
+                        time.sleep(retry_delay * (2 ** attempt))
+            except (RateLimitError, APIError, APIConnectionError) as e:
+                # Handle rate limit errors with exponential backoff
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Last attempt failed, raise with user-friendly message
+                    raise Exception(
+                        "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                        "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                    ) from e
+            except Exception as e:
+                # For other errors, check if it's a rate limit error by string matching
+                error_str = str(e).lower()
+                error_type = type(e).__name__.lower()
+                if 'rate limit' in error_str or 'ratelimit' in error_str or 'ratelimiterror' in error_type:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise Exception(
+                            "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                            "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                        ) from e
+                else:
+                    # For other errors, raise immediately
+                    raise
         
         # Extract citations
         citations = []
@@ -208,13 +283,68 @@ Format the response as a structured plan with clear phases (Week 1, Week 2, etc.
             HumanMessage(content=user_prompt)
         ]
         
-        try:
-            response = self.llm.invoke(messages)
-            plan_text = response.content if hasattr(response, 'content') else str(response)
-        except AttributeError:
-            # Fallback for older API
-            response = self.llm(messages)
-            plan_text = response.content if hasattr(response, 'content') else str(response)
+        # Retry logic for rate limits and API errors
+        max_retries = 3
+        retry_delay = 2  # Start with 2 seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = self.llm.invoke(messages)
+                plan_text = response.content if hasattr(response, 'content') else str(response)
+                break  # Success, exit retry loop
+            except AttributeError:
+                # Fallback for older API
+                try:
+                    response = self.llm(messages)
+                    plan_text = response.content if hasattr(response, 'content') else str(response)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    error_str = str(e).lower()
+                    error_type = type(e).__name__.lower()
+                    # Check if it's a rate limit error
+                    if 'rate limit' in error_str or 'ratelimit' in error_str or 'ratelimiterror' in error_type:
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (2 ** attempt)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise Exception(
+                                "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                                "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                            ) from e
+                    elif attempt == max_retries - 1:
+                        raise
+                    else:
+                        time.sleep(retry_delay * (2 ** attempt))
+            except (RateLimitError, APIError, APIConnectionError) as e:
+                # Handle rate limit errors with exponential backoff
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # Last attempt failed, raise with user-friendly message
+                    raise Exception(
+                        "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                        "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                    ) from e
+            except Exception as e:
+                # For other errors, check if it's a rate limit error by string matching
+                error_str = str(e).lower()
+                error_type = type(e).__name__.lower()
+                if 'rate limit' in error_str or 'ratelimit' in error_str or 'ratelimiterror' in error_type:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise Exception(
+                            "OpenAI API rate limit exceeded. Please wait a moment and try again. "
+                            "If this persists, you may need to upgrade your OpenAI plan or reduce request frequency."
+                        ) from e
+                else:
+                    # For other errors, raise immediately
+                    raise
         
         # Parse plan into structured format
         plan_data = self._parse_plan(plan_text)

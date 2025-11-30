@@ -5,7 +5,7 @@ Document ingestion module for processing PDFs and building knowledge base with C
 import os
 import PyPDF2
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
@@ -44,24 +44,61 @@ class DocumentIngester:
                 embedding_function=self.embedding_function
             )
     
-    def extract_text_from_pdf(self, pdf_path: str) -> List[Dict[str, str]]:
-        """Extract text from PDF file, splitting by pages."""
+    def extract_text_from_pdf(self, pdf_path: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
+        """Extract text from PDF file, splitting by pages.
+        
+        Returns:
+            Tuple of (chunks list, error_message if any)
+        """
         chunks = []
+        error_msg = None
         try:
             with open(pdf_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
+                
+                # Check if PDF is encrypted
+                if pdf_reader.is_encrypted:
+                    return [], "PDF file is password-protected. Please remove the password and try again."
+                
+                # Check number of pages
+                num_pages = len(pdf_reader.pages)
+                if num_pages == 0:
+                    return [], "PDF file appears to be empty or corrupted."
+                
+                total_text_length = 0
                 for page_num, page in enumerate(pdf_reader.pages):
-                    text = page.extract_text()
-                    if text.strip():
-                        chunks.append({
-                            'text': text,
-                            'page': page_num + 1,
-                            'source': os.path.basename(pdf_path)
-                        })
+                    try:
+                        text = page.extract_text()
+                        if text.strip():
+                            chunks.append({
+                                'text': text,
+                                'page': page_num + 1,
+                                'source': os.path.basename(pdf_path)
+                            })
+                            total_text_length += len(text.strip())
+                    except Exception as page_error:
+                        # Continue with other pages if one page fails
+                        print(f"Warning: Could not extract text from page {page_num + 1}: {page_error}")
+                
+                # Check if we extracted any text
+                if not chunks:
+                    if num_pages > 0:
+                        return [], "No extractable text found in PDF. This might be a scanned document (image-based PDF). Please use OCR to extract text first."
+                    else:
+                        return [], "Could not extract any text from the PDF file."
+                        
+        except PyPDF2.errors.PdfReadError as e:
+            return [], f"PDF file is corrupted or invalid: {str(e)}"
+        except FileNotFoundError:
+            return [], f"PDF file not found: {pdf_path}"
+        except PermissionError:
+            return [], f"Permission denied: Cannot read PDF file {pdf_path}"
         except Exception as e:
-            print(f"Error extracting text from PDF: {e}")
-            return []
-        return chunks
+            error_msg = f"Unexpected error extracting text from PDF: {str(e)}"
+            print(error_msg)
+            return [], error_msg
+        
+        return chunks, None
     
     def chunk_text(self, text: str, chunk_size: int = 1000, 
                    overlap: int = 200) -> List[str]:
@@ -78,14 +115,21 @@ class DocumentIngester:
             start = end - overlap
         return chunks
     
-    def process_pdf(self, pdf_path: str, metadata: Dict = None) -> bool:
-        """Process a PDF file and add to ChromaDB."""
+    def process_pdf(self, pdf_path: str, metadata: Dict = None) -> Tuple[bool, Optional[str]]:
+        """Process a PDF file and add to ChromaDB.
+        
+        Returns:
+            Tuple of (success: bool, error_message: str or None)
+        """
         try:
             # Extract text from PDF
-            pdf_chunks = self.extract_text_from_pdf(pdf_path)
+            pdf_chunks, extract_error = self.extract_text_from_pdf(pdf_path)
+            
+            if extract_error:
+                return False, extract_error
             
             if not pdf_chunks:
-                return False
+                return False, "No text could be extracted from the PDF file. The file might be empty, corrupted, or image-based (scanned document)."
             
             # Prepare documents for ChromaDB
             documents = []
@@ -125,13 +169,17 @@ class DocumentIngester:
             # Update document status
             self.db.update_document_status(doc_id, 'processed')
             
-            return True
+            return True, None
             
         except Exception as e:
-            print(f"Error processing PDF: {e}")
+            error_msg = f"Error processing PDF: {str(e)}"
+            print(error_msg)
             if 'doc_id' in locals():
-                self.db.update_document_status(doc_id, 'error')
-            return False
+                try:
+                    self.db.update_document_status(doc_id, 'error')
+                except:
+                    pass  # Don't fail if we can't update status
+            return False, error_msg
     
     def query_knowledge_base(self, query: str, n_results: int = 5) -> List[Dict]:
         """Query the knowledge base and return relevant chunks with metadata."""

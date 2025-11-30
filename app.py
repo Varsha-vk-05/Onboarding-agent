@@ -33,9 +33,48 @@ if 'db' not in st.session_state:
 if 'ingester' not in st.session_state:
     st.session_state.ingester = DocumentIngester()
 
-if 'agent' not in st.session_state:
+# Check for API key in multiple sources: Streamlit secrets, environment variable, or session state
+def get_openai_api_key():
+    """Get OpenAI API key from multiple sources in order of priority."""
+    # 1. Check Streamlit secrets (for Streamlit Cloud deployment)
     try:
-        st.session_state.agent = OnboardingAgent()
+        if hasattr(st, 'secrets') and 'OPENAI_API_KEY' in st.secrets:
+            return st.secrets['OPENAI_API_KEY']
+    except Exception:
+        pass
+    
+    # 2. Check environment variable
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        return api_key
+    
+    # 3. Check session state (user-entered key)
+    if 'openai_api_key' in st.session_state and st.session_state.openai_api_key:
+        return st.session_state.openai_api_key
+    
+    return None
+
+# Initialize or reinitialize agent if API key is available
+api_key = get_openai_api_key()
+if 'agent' not in st.session_state:
+    # First time initialization
+    if api_key:
+        try:
+            # Temporarily set the environment variable for the agent initialization
+            os.environ['OPENAI_API_KEY'] = api_key
+            st.session_state.agent = OnboardingAgent(openai_api_key=api_key)
+        except Exception as e:
+            st.session_state.agent = None
+            st.session_state.agent_error = str(e)
+    else:
+        st.session_state.agent = None
+        st.session_state.agent_error = "OpenAI API key not found"
+elif st.session_state.agent is None and api_key:
+    # Reinitialize if agent was None but API key is now available
+    try:
+        os.environ['OPENAI_API_KEY'] = api_key
+        st.session_state.agent = OnboardingAgent(openai_api_key=api_key)
+        st.session_state.agent_error = None
     except Exception as e:
         st.session_state.agent = None
         st.session_state.agent_error = str(e)
@@ -894,10 +933,58 @@ def main():
         label_visibility="collapsed"
     )
     
-    # Check for agent initialization
+    # Check for agent initialization and provide API key input
     if st.session_state.agent is None:
         st.sidebar.error("⚠️ OpenAI API key not configured")
-        st.sidebar.info("Please set OPENAI_API_KEY environment variable in .env")
+        
+        # Show error details if available
+        if hasattr(st.session_state, 'agent_error') and st.session_state.agent_error:
+            st.sidebar.caption(f"Error: {st.session_state.agent_error}")
+        
+        # Provide input field for API key
+        st.sidebar.markdown("### 🔑 Configure API Key")
+        api_key_input = st.sidebar.text_input(
+            "Enter OpenAI API Key",
+            type="password",
+            help="Enter your OpenAI API key here. It will be stored in session state.",
+            key="api_key_input"
+        )
+        
+        if st.sidebar.button("💾 Save API Key"):
+            if api_key_input:
+                st.session_state.openai_api_key = api_key_input
+                # Set environment variable
+                os.environ['OPENAI_API_KEY'] = api_key_input
+                # Try to initialize agent
+                try:
+                    st.session_state.agent = OnboardingAgent(openai_api_key=api_key_input)
+                    st.session_state.agent_error = None
+                    st.sidebar.success("✅ API key saved and validated!")
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.agent = None
+                    st.session_state.agent_error = str(e)
+                    st.sidebar.error(f"❌ Error: {str(e)}")
+            else:
+                st.sidebar.warning("Please enter an API key")
+        
+        st.sidebar.markdown("---")
+        st.sidebar.info("""
+        **For deployment:**
+        - **Streamlit Cloud**: Add `OPENAI_API_KEY` in Settings → Secrets
+        - **Local**: Set in `.env` file or environment variable
+        - **Or**: Enter it above to use in this session
+        """)
+    else:
+        # Show success status
+        st.sidebar.success("✅ OpenAI API key configured")
+        # Option to clear/change API key
+        if st.sidebar.button("🔄 Change API Key"):
+            st.session_state.agent = None
+            st.session_state.openai_api_key = None
+            if 'OPENAI_API_KEY' in os.environ:
+                del os.environ['OPENAI_API_KEY']
+            st.rerun()
     
     # Route to appropriate page
     if page == "Dashboard":
@@ -1077,12 +1164,23 @@ def show_document_upload():
         # Process file
         if st.button("🔄 Process Document"):
             with st.spinner("Processing document and building knowledge base..."):
-                success = st.session_state.ingester.process_pdf(str(file_path))
+                success, error_message = st.session_state.ingester.process_pdf(str(file_path))
                 
                 if success:
                     st.success("✨ Document processed successfully and added to knowledge base!")
                 else:
-                    st.error("❌ Error processing document. Please check the file format.")
+                    st.error("❌ Error processing document")
+                    if error_message:
+                        st.warning(f"**Details:** {error_message}")
+                        # Provide helpful suggestions based on error
+                        if "password" in error_message.lower() or "encrypted" in error_message.lower():
+                            st.info("💡 **Tip:** Remove the password from your PDF file and try again.")
+                        elif "scanned" in error_message.lower() or "image-based" in error_message.lower() or "no extractable text" in error_message.lower():
+                            st.info("💡 **Tip:** This appears to be a scanned PDF (image-based). You may need to use OCR (Optical Character Recognition) software to extract text first.")
+                        elif "corrupted" in error_message.lower() or "invalid" in error_message.lower():
+                            st.info("💡 **Tip:** The PDF file may be corrupted. Try opening it in a PDF viewer to verify it's valid, or try re-saving it.")
+                    else:
+                        st.warning("Please check the file format and ensure it's a valid PDF file.")
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -1256,13 +1354,24 @@ def show_onboarding_plans():
                 st.rerun()
         
         if st.button("🔄 Regenerate Plan"):
-            st.info("Regenerating plan...")
             if st.session_state.agent:
-                plan_data = st.session_state.agent.generate_onboarding_plan(
-                    selected_employee_id, employee
-                )
-                st.success("Plan regenerated!")
-                st.rerun()
+                with st.spinner("Regenerating plan..."):
+                    try:
+                        plan_data = st.session_state.agent.generate_onboarding_plan(
+                            selected_employee_id, employee
+                        )
+                        st.success("Plan regenerated!")
+                        st.rerun()
+                    except Exception as e:
+                        error_msg = str(e)
+                        if 'rate limit' in error_msg.lower():
+                            st.error("⚠️ **Rate Limit Error**")
+                            st.warning(
+                                "OpenAI API rate limit exceeded. Please wait a few minutes and try again. "
+                                "If this persists, you may need to upgrade your OpenAI plan."
+                            )
+                        else:
+                            st.error(f"❌ Error regenerating plan: {error_msg}")
             else:
                 st.error("AI agent not configured.")
     else:
@@ -1271,11 +1380,22 @@ def show_onboarding_plans():
         if st.button("✨ Generate Onboarding Plan"):
             if st.session_state.agent:
                 with st.spinner("Generating personalized onboarding plan..."):
-                    plan_data = st.session_state.agent.generate_onboarding_plan(
-                        selected_employee_id, employee
-                    )
-                    st.success("✨ Onboarding plan generated successfully!")
-                    st.rerun()
+                    try:
+                        plan_data = st.session_state.agent.generate_onboarding_plan(
+                            selected_employee_id, employee
+                        )
+                        st.success("✨ Onboarding plan generated successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        error_msg = str(e)
+                        if 'rate limit' in error_msg.lower():
+                            st.error("⚠️ **Rate Limit Error**")
+                            st.warning(
+                                "OpenAI API rate limit exceeded. Please wait a few minutes and try again. "
+                                "If this persists, you may need to upgrade your OpenAI plan."
+                            )
+                        else:
+                            st.error(f"❌ Error generating plan: {error_msg}")
             else:
                 st.error("AI agent not configured. Please set OPENAI_API_KEY.")
     
@@ -1319,21 +1439,37 @@ def show_qa_assistant():
     if st.button("Ask Question"):
         if question:
             with st.spinner("Searching knowledge base and generating answer..."):
-                result = st.session_state.agent.answer_question(question, employee_context)
-                
-                # Display answer
-                st.markdown("### Answer")
-                st.write(result['answer'])
-                
-                # Display citations
-                if result['citations']:
-                    st.markdown("### Sources")
-                    for citation in result['citations']:
-                        st.write(f"• **{citation['source']}** (Page {citation['page']})")
-                        if citation.get('relevance_score'):
-                            st.progress(citation['relevance_score'])
-                else:
-                    st.info("No specific sources found for this question.")
+                try:
+                    result = st.session_state.agent.answer_question(question, employee_context)
+                    
+                    # Display answer
+                    st.markdown("### Answer")
+                    st.write(result['answer'])
+                    
+                    # Display citations
+                    if result['citations']:
+                        st.markdown("### Sources")
+                        for citation in result['citations']:
+                            st.write(f"• **{citation['source']}** (Page {citation['page']})")
+                            if citation.get('relevance_score'):
+                                st.progress(citation['relevance_score'])
+                    else:
+                        st.info("No specific sources found for this question.")
+                except Exception as e:
+                    error_msg = str(e)
+                    if 'rate limit' in error_msg.lower():
+                        st.error("⚠️ **Rate Limit Error**")
+                        st.warning(
+                            "OpenAI API rate limit exceeded. This usually happens when:\n"
+                            "- You've made too many requests in a short time\n"
+                            "- Your OpenAI account has usage limits\n\n"
+                            "**Solutions:**\n"
+                            "- Wait a few minutes and try again\n"
+                            "- Upgrade your OpenAI plan for higher rate limits\n"
+                            "- Reduce the frequency of requests"
+                        )
+                    else:
+                        st.error(f"❌ Error: {error_msg}")
         else:
             st.warning("Please enter a question.")
     

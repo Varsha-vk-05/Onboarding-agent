@@ -5,6 +5,7 @@ Uses SQLite for simplicity and portability.
 
 import sqlite3
 import json
+import os
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from pathlib import Path
@@ -15,14 +16,72 @@ class Database:
     
     def __init__(self, db_path: str = "onboarding.db"):
         """Initialize database connection and create tables if needed."""
-        self.db_path = db_path
+        # Try to use the provided path first
+        original_path = Path(db_path)
+        
+        # Check if the original path is writable
+        if original_path.exists():
+            # File exists, check if it's writable
+            if not os.access(original_path, os.W_OK):
+                # Try alternative locations
+                alt_paths = [
+                    Path.cwd() / "onboarding.db",  # Current directory
+                    Path("/tmp") / "onboarding.db",  # Temp directory (Linux/Mac)
+                    Path.home() / ".onboarding.db",  # Home directory
+                ]
+                for alt_path in alt_paths:
+                    try:
+                        alt_path.parent.mkdir(parents=True, exist_ok=True)
+                        if os.access(alt_path.parent, os.W_OK):
+                            self.db_path = str(alt_path)
+                            break
+                    except (PermissionError, OSError):
+                        continue
+                else:
+                    # If all alternatives fail, use original and let it fail with a clear error
+                    self.db_path = db_path
+            else:
+                self.db_path = db_path
+        else:
+            # File doesn't exist, check if we can create it in the directory
+            try:
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+                if os.access(original_path.parent, os.W_OK):
+                    self.db_path = db_path
+                else:
+                    # Try current directory as fallback
+                    self.db_path = str(Path.cwd() / "onboarding.db")
+            except (PermissionError, OSError):
+                # Fallback to current directory
+                self.db_path = str(Path.cwd() / "onboarding.db")
+        
+        # Ensure the directory exists
+        db_file = Path(self.db_path)
+        try:
+            db_file.parent.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError) as e:
+            raise PermissionError(
+                f"Cannot create database directory: {db_file.parent}. "
+                f"Error: {str(e)}. Please check file permissions."
+            )
+        
         self.init_db()
     
     def get_connection(self):
-        """Get database connection."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Get database connection with error handling."""
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            conn.execute("PRAGMA journal_mode=WAL")
+            return conn
+        except sqlite3.OperationalError as e:
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                raise PermissionError(
+                    f"Database is read-only. Cannot write to: {self.db_path}. "
+                    "Please check file permissions or use a writable location."
+                ) from e
+            raise
     
     def init_db(self):
         """Initialize database tables."""
@@ -261,29 +320,45 @@ class Database:
     def add_document(self, filename: str, file_path: str, 
                     file_type: str = 'pdf') -> int:
         """Add document metadata."""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO documents (filename, file_path, file_type)
-            VALUES (?, ?, ?)
-        """, (filename, file_path, file_type))
-        doc_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
-        return doc_id
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO documents (filename, file_path, file_type)
+                VALUES (?, ?, ?)
+            """, (filename, file_path, file_type))
+            doc_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return doc_id
+        except (sqlite3.OperationalError, PermissionError) as e:
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                raise PermissionError(
+                    "Database is read-only. Cannot add document. "
+                    "Please check file permissions or contact the administrator."
+                ) from e
+            raise
     
     def update_document_status(self, doc_id: int, status: str):
         """Update document processing status."""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        processed_at = datetime.now().isoformat() if status == 'processed' else None
-        cursor.execute("""
-            UPDATE documents 
-            SET status = ?, processed_at = ?
-            WHERE id = ?
-        """, (status, processed_at, doc_id))
-        conn.commit()
-        conn.close()
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            processed_at = datetime.now().isoformat() if status == 'processed' else None
+            cursor.execute("""
+                UPDATE documents 
+                SET status = ?, processed_at = ?
+                WHERE id = ?
+            """, (status, processed_at, doc_id))
+            conn.commit()
+            conn.close()
+        except (sqlite3.OperationalError, PermissionError) as e:
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                raise PermissionError(
+                    "Database is read-only. Cannot update document status. "
+                    "Please check file permissions or contact the administrator."
+                ) from e
+            raise
     
     def get_documents(self) -> List[Dict]:
         """Get all documents."""

@@ -137,7 +137,10 @@ class DocumentIngester:
             ids = []
             
             filename = os.path.basename(pdf_path)
-            doc_id = self.db.add_document(filename, pdf_path, 'pdf')
+            try:
+                doc_id = self.db.add_document(filename, pdf_path, 'pdf')
+            except PermissionError as db_error:
+                return False, f"Database error: {str(db_error)}. The database file may be read-only or you may not have write permissions."
             
             for chunk_data in pdf_chunks:
                 # Further chunk if needed
@@ -171,9 +174,22 @@ class DocumentIngester:
             
             return True, None
             
+        except PermissionError as e:
+            # Database permission error
+            error_msg = f"Database permission error: {str(e)}"
+            print(error_msg)
+            if 'doc_id' in locals():
+                try:
+                    self.db.update_document_status(doc_id, 'error')
+                except:
+                    pass  # Don't fail if we can't update status
+            return False, error_msg
         except Exception as e:
             error_msg = f"Error processing PDF: {str(e)}"
             print(error_msg)
+            # Check if it's a database readonly error
+            if "readonly" in str(e).lower() or "read-only" in str(e).lower():
+                error_msg = f"Database is read-only: {str(e)}. Please check file permissions."
             if 'doc_id' in locals():
                 try:
                     self.db.update_document_status(doc_id, 'error')

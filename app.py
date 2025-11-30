@@ -1173,7 +1173,23 @@ def show_document_upload():
                     if error_message:
                         st.warning(f"**Details:** {error_message}")
                         # Provide helpful suggestions based on error
-                        if "password" in error_message.lower() or "encrypted" in error_message.lower():
+                        if "readonly" in error_message.lower() or "read-only" in error_message.lower() or "permission" in error_message.lower() or "database" in error_message.lower():
+                            st.error("🔒 **Database Permission Error**")
+                            st.info("""
+                            **This error occurs when the database file is read-only.**
+                            
+                            **For Streamlit Cloud:**
+                            - This is a known limitation. The database file may need to be in a writable location.
+                            - Try restarting the app or redeploying.
+                            
+                            **For Local Development:**
+                            - Check file permissions on `onboarding.db`
+                            - Ensure you have write access to the directory
+                            - Try deleting the database file and letting the app recreate it
+                            
+                            **Workaround:** The app will try to use an alternative location automatically.
+                            """)
+                        elif "password" in error_message.lower() or "encrypted" in error_message.lower():
                             st.info("💡 **Tip:** Remove the password from your PDF file and try again.")
                         elif "scanned" in error_message.lower() or "image-based" in error_message.lower() or "no extractable text" in error_message.lower():
                             st.info("💡 **Tip:** This appears to be a scanned PDF (image-based). You may need to use OCR (Optical Character Recognition) software to extract text first.")
